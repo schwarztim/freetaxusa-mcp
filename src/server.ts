@@ -52,7 +52,7 @@ export function createServer(): McpServer {
   // Phase 1: Session tools
   server.tool(
     'authenticate',
-    'Log in to FreeTaxUSA with email and password. Credentials are used once and never stored.',
+    'Log in to FreeTaxUSA. When Hermes is configured (HERMES_URL/HERMES_CLIENT_TOKEN), the session is brokered by Hermes and no email/password is needed. Otherwise, pass email and password for the embedded browser login (credentials are used once and never stored).',
     authenticateSchema.shape,
     wrapHandler(args => authenticate(authenticateSchema.parse(args))),
   );

@@ -44,7 +44,7 @@ You: "Here's my W-2, help me file"
 
 | Tool | Description |
 |------|-------------|
-| `authenticate` | Log in with email and password. Credentials used once, never stored. |
+| `authenticate` | Log in. With Hermes configured, the session is brokered (no credentials needed). Otherwise pass email/password — used once, never stored. |
 | `get_session_status` | Check if session is active, which tax year and section is loaded. |
 
 ### Page Interaction
@@ -138,9 +138,46 @@ Or for Claude Desktop (`claude_desktop_config.json`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `HERMES_URL` | _(unset)_ | Hermes broker URL. When set with `HERMES_CLIENT_TOKEN`, Hermes is the authoritative auth path — see [Authentication via Hermes](#authentication-via-hermes). |
+| `HERMES_CLIENT_TOKEN` | _(unset)_ | Bearer token for the Hermes broker (from `~/.hermes/client.token`). |
+| `HERMES_SERVICE` | `freetaxusa` | Service name registered with Hermes. |
+| `HERMES_SCHEME` | `cookie-session` | Credential scheme to request from Hermes. |
+| `FREETAXUSA_LEGACY_AUTH` | `false` | Opt back into the embedded Playwright login even when Hermes is configured-but-down. Default fails loudly on a broker outage. |
 | `FREETAXUSA_HEADLESS` | `true` | Set to `false` to see the browser window |
 | `FREETAXUSA_USER_DATA_DIR` | `~/.freetaxusa-mcp/browser-profile/` | Browser profile directory |
 | `FREETAXUSA_TAX_YEAR` | `2025` | Tax year to file (change for prior years) |
+
+### Authentication via Hermes
+
+FreeTaxUSA has no API — authentication is a browser login session (cookies). By
+default this server drives an embedded Playwright login with the email/password
+you pass to the `authenticate` tool.
+
+When the [Hermes](https://github.com/) auth broker is configured, it becomes the
+**authoritative auth path**: Hermes performs the login on the host (handling SSO,
+MFA, captcha) and hands this server a fresh cookie session, which is injected
+into the browser context. In this mode the `authenticate` tool needs **no
+email/password** — just call it.
+
+```bash
+export HERMES_URL=http://127.0.0.1:9876
+export HERMES_CLIENT_TOKEN="$(cat ~/.hermes/client.token)"
+# optional overrides:
+# export HERMES_SERVICE=freetaxusa
+# export HERMES_SCHEME=cookie-session
+```
+
+Behavior:
+
+- **Hermes configured + reachable** → cookie session brokered by Hermes; embedded login is skipped.
+- **Hermes configured + unreachable** → authentication **fails loudly** (does not silently fall back to the embedded login). Set `FREETAXUSA_LEGACY_AUTH=true` to opt into the embedded fallback and supply email/password.
+- **Hermes not configured** → embedded Playwright login as before (email/password required).
+
+> **Operator setup required:** this server becomes Hermes-capable in code, but
+> runtime success depends on the operator registering FreeTaxUSA `cookie-session`
+> credentials with the Hermes broker. Until that is done, set
+> `FREETAXUSA_LEGACY_AUTH=true` (or leave Hermes unconfigured) to use the
+> embedded login.
 
 ### Use
 

@@ -3,15 +3,15 @@
  */
 
 import { z } from 'zod';
-import { getPage, isSessionExpired, extractSidFromUrl, AUTH_URL, BASE_URL, acquirePageLock } from '../browser/context.js';
+import { getPage, isSessionExpired, extractSidFromUrl, AUTH_URL, BASE_URL, acquirePageLock, seedSessionFromHermes } from '../browser/context.js';
 import { discoverSidMap, waitForPageReady } from '../browser/navigation.js';
 import { filterPII } from '../security/pii-filter.js';
 import type { SessionStatus } from '../types/tax.js';
 import { getPageTitle } from '../browser/forms.js';
 
 export const authenticateSchema = z.object({
-  email: z.string().email().describe('FreeTaxUSA account email'),
-  password: z.string().min(1).describe('FreeTaxUSA account password'),
+  email: z.string().email().optional().describe('FreeTaxUSA account email (not required when Hermes brokers the login)'),
+  password: z.string().min(1).optional().describe('FreeTaxUSA account password (not required when Hermes brokers the login)'),
   mfaCode: z.string().optional().describe('MFA code if prompted'),
 });
 
@@ -19,6 +19,59 @@ export async function authenticate(input: z.infer<typeof authenticateSchema>): P
   const release = await acquirePageLock();
   try {
     const page = await getPage();
+
+    // Hermes is the AUTHORITATIVE auth path when configured. Try it before any
+    // embedded Playwright login. If it seeds a session, verify it landed and
+    // return — no email/password needed. If Hermes is not configured (or is
+    // configured-but-down with FREETAXUSA_LEGACY_AUTH=true), fall through to the
+    // embedded login below. If configured-but-down without the legacy flag,
+    // seedSessionFromHermes() throws (fail loud).
+    const hermesOutcome = await seedSessionFromHermes();
+    if (hermesOutcome === 'seeded') {
+      await page.goto(BASE_URL, { waitUntil: 'networkidle', timeout: 20_000 }).catch(() => {});
+      await waitForPageReady(page);
+      const landedUrl = page.url();
+      const hermesAuthenticated = landedUrl.includes('freetaxusa.com') && !landedUrl.includes('auth.freetaxusa.com');
+      const taxYearHermes = process.env.FREETAXUSA_TAX_YEAR ?? '2025';
+
+      if (hermesAuthenticated) {
+        await discoverSidMap(page);
+        return filterPII({
+          authenticated: true,
+          authSource: 'hermes',
+          taxYear: taxYearHermes,
+          currentUrl: landedUrl,
+          message: 'Authenticated via Hermes-brokered session.',
+        });
+      }
+
+      // Cookies were injected but the site still bounced us to login — the
+      // brokered session is stale/invalid. Do NOT silently retry with embedded
+      // login: that defeats Hermes ownership. Surface it so the operator
+      // refreshes the Hermes-side credential.
+      return filterPII({
+        authenticated: false,
+        authSource: 'hermes',
+        taxYear: taxYearHermes,
+        currentUrl: landedUrl,
+        message:
+          'Hermes provided a session but FreeTaxUSA still requires login (stale/invalid brokered cookies). ' +
+          'Refresh the freetaxusa cookie-session credential in Hermes. ' +
+          '(Set FREETAXUSA_LEGACY_AUTH=true to allow the embedded Playwright login fallback.)',
+      });
+    }
+
+    // Embedded Playwright login path: Hermes not configured, or configured-but-down
+    // with FREETAXUSA_LEGACY_AUTH=true. Requires email + password.
+    if (!input.email || !input.password) {
+      return filterPII({
+        authenticated: false,
+        error: 'credentials_required',
+        message:
+          'email and password are required for the embedded login. ' +
+          'Configure Hermes (HERMES_URL/HERMES_CLIENT_TOKEN) to broker the login instead.',
+      });
+    }
 
     await page.goto(AUTH_URL, { waitUntil: 'networkidle', timeout: 20_000 });
     await waitForPageReady(page);
@@ -71,6 +124,7 @@ export async function authenticate(input: z.infer<typeof authenticateSchema>): P
 
     return filterPII({
       authenticated,
+      authSource: 'embedded',
       taxYear,
       currentUrl: finalUrl,
       message: authenticated ? 'Successfully authenticated.' : 'Authentication failed. Check credentials.',
